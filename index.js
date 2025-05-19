@@ -160,19 +160,19 @@ class PharosTestnet {
             "Authorization": "Bearer null",
             "Content-Length": "0"
         };
-
         for (let attempt = 0; attempt < 5; attempt++) {
             try {
                 const response = await axios.post(urlLogin, null, {
                     headers,
-                    timeout: 120000
+                    timeout: 15000
                 });
                 return response.data.data.jwt;
             } catch (e) {
                 if (attempt < 4) {
-                    await new Promise(resolve => setTimeout(resolve, 5000));
+                    await new Promise(resolve => setTimeout(resolve, 2000));
                     continue;
                 }
+                this.log(chalk.red(`Login error: ${e.message}`));
                 return null;
             }
         }
@@ -184,19 +184,19 @@ class PharosTestnet {
             ...this.headers,
             "Authorization": `Bearer ${token}`
         };
-
         for (let attempt = 0; attempt < 5; attempt++) {
             try {
                 const response = await axios.get(url, {
                     headers,
-                    timeout: 120000
+                    timeout: 15000
                 });
                 return response.data;
             } catch (e) {
                 if (attempt < 4) {
-                    await new Promise(resolve => setTimeout(resolve, 5000));
+                    await new Promise(resolve => setTimeout(resolve, 2000));
                     continue;
                 }
+                this.log(chalk.red(`Faucet status error: ${e.message}`));
                 return null;
             }
         }
@@ -209,12 +209,11 @@ class PharosTestnet {
             "Authorization": `Bearer ${token}`,
             "Content-Length": "0"
         };
-
         for (let attempt = 0; attempt < 5; attempt++) {
             try {
                 const response = await axios.post(url, null, {
                     headers,
-                    timeout: 120000
+                    timeout: 15000
                 });
                 return response.data;
             } catch (e) {
@@ -222,9 +221,10 @@ class PharosTestnet {
                     return e.response.data;
                 }
                 if (attempt < 4) {
-                    await new Promise(resolve => setTimeout(resolve, 5000));
+                    await new Promise(resolve => setTimeout(resolve, 2000));
                     continue;
                 }
+                this.log(chalk.red(`Faucet claim error: ${e.message}`));
                 return null;
             }
         }
@@ -238,6 +238,9 @@ class PharosTestnet {
         if (!urlLogin) return;
 
         this.log(`=========================[ ${this.maskAccount(address)} ]=========================`);
+
+        // Wait 2 seconds before login
+        await new Promise(resolve => setTimeout(resolve, 2000));
 
         // Login
         const token = await this.userLogin(urlLogin);
@@ -266,7 +269,6 @@ class PharosTestnet {
                     if (claim?.msg === "ok") {
                         break;
                     } else if (claim?.msg === "error") {
-                        // If backend/network error, retry
                         if (claim.msg && claim.msg.toLowerCase().includes("transfer token failed")) {
                             lastError = claim;
                             this.log(chalk.yellow(`Faucet: Claim failed, retry [${retries + 1}/3]`));
@@ -290,7 +292,7 @@ class PharosTestnet {
                     this.log(chalk.red(`Faucet: ${claim.data?.message || "Claim Failed"}`));
                     this.failedClaims++;
                 } else {
-                    this.log(chalk.red(`Faucet: Claim Failed`));
+                    this.log(chalk.red(`Faucet: Claim Failed | Response: ${JSON.stringify(lastError || claim)}`));
                     this.failedClaims++;
                 }
             } else {
@@ -377,60 +379,101 @@ class PharosTestnet {
 
     async transferFaucet() {
         if (!fs.existsSync('accounts.txt')) {
-            this.log("No wallets found. Please generate wallets first.");
+            this.log(chalk.red("No wallets found. Please generate wallets first."));
             return;
         }
 
         const accounts = fs.readFileSync('accounts.txt', 'utf8').split('\n').filter(Boolean);
         if (accounts.length < 2) {
-            this.log("Need at least 2 wallets for transfer. Please generate more wallets.");
+            this.log(chalk.red("Need at least 2 wallets for transfer. Please generate more wallets."));
             return;
         }
 
-        // Show available wallets
-        this.log("Available Wallets:");
-        for (let i = 0; i < accounts.length; i++) {
-            const address = this.generateAddress(accounts[i]);
-            if (address) {
-                const balance = await this.getBalance(address);
-                this.log(`${i + 1}. ${this.maskAccount(address)} | Balance: ${balance} PHRS`);
+        // Get destination wallet address from user
+        const destAddress = await this.askQuestion(chalk.green("Enter destination wallet address -> "));
+        if (!ethers.isAddress(destAddress)) {
+            this.log(chalk.red("Invalid wallet address."));
+            return;
+        }
+
+        // Show total balance before transfer
+        this.log(chalk.yellow("Checking balances before transfer..."));
+        let totalBalance = 0;
+        for (const privateKey of accounts) {
+            if (privateKey) {
+                const address = this.generateAddress(privateKey);
+                if (address) {
+                    const balance = await this.getBalance(address);
+                    if (balance !== "Error") {
+                        totalBalance += parseFloat(balance);
+                    }
+                }
+            }
+        }
+        this.log(chalk.yellow(`Total balance across all wallets: ${totalBalance} PHRS`));
+
+        // Confirm transfer
+        const confirm = await this.askQuestion(chalk.yellow(`Do you want to transfer all ${totalBalance} PHRS to ${destAddress}? (y/n) -> `));
+        if (confirm.toLowerCase() !== 'y') {
+            this.log(chalk.red("Transfer cancelled."));
+            return;
+        }
+
+        // Process each wallet
+        let successfulTransfers = 0;
+        let failedTransfers = 0;
+        let processedCount = 0;
+
+        for (const privateKey of accounts) {
+            if (privateKey) {
+                const address = this.generateAddress(privateKey);
+                if (address) {
+                    const balance = await this.getBalance(address);
+                    if (balance !== "Error" && parseFloat(balance) >= 0.09) {
+                        processedCount++;
+                        this.log(chalk.cyan(`Processing wallet: ${this.maskAccount(address)} [${processedCount}/${accounts.length}]`));
+                        this.log(chalk.cyan(`Balance: ${balance} PHRS`));
+
+                        try {
+                            const wallet = new ethers.Wallet(privateKey, this.provider);
+                            // Get gas price
+                            const gasPrice = await this.provider.getFeeData();
+                            const gasLimit = 21000; // Standard gas limit for simple transfers
+                            const gasCost = gasPrice.gasPrice * BigInt(gasLimit);
+                            // Calculate amount to send (leave some for gas)
+                            const balanceWei = ethers.parseEther(balance);
+                            const amountToSend = balanceWei - gasCost;
+                            if (amountToSend <= 0) {
+                                this.log(chalk.yellow("Balance too low to cover gas fees. Skipping..."));
+                                failedTransfers++;
+                                continue;
+                            }
+                            const tx = await wallet.sendTransaction({
+                                to: destAddress,
+                                value: amountToSend,
+                                gasLimit: gasLimit
+                            });
+                            this.log(chalk.green(`Transaction sent! Hash: ${tx.hash}`));
+                            await tx.wait();
+                            this.log(chalk.green("Transaction confirmed!"));
+                            successfulTransfers++;
+                        } catch (e) {
+                            this.log(chalk.red(`Transfer failed: ${e.message}`));
+                            failedTransfers++;
+                        }
+                        // Add delay between transactions
+                        await new Promise(resolve => setTimeout(resolve, 3000));
+                    } else if (balance !== "Error") {
+                        this.log(chalk.yellow(`Wallet ${this.maskAccount(address)} skipped (balance < 0.09 PHRS)`));
+                    }
+                }
             }
         }
 
-        // Get source wallet
-        const sourceIndex = parseInt(await this.askQuestion("\nSelect source wallet number -> ")) - 1;
-        if (sourceIndex < 0 || sourceIndex >= accounts.length) {
-            this.log("Invalid source wallet selection.");
-            return;
-        }
-
-        // Get destination wallet
-        const destIndex = parseInt(await this.askQuestion("Select destination wallet number -> ")) - 1;
-        if (destIndex < 0 || destIndex >= accounts.length || destIndex === sourceIndex) {
-            this.log("Invalid destination wallet selection.");
-            return;
-        }
-
-        // Get amount
-        const amount = await this.askQuestion("Enter amount to transfer (in PHRS) -> ");
-        const amountWei = ethers.parseEther(amount);
-
-        // Create wallet instance
-        const sourceWallet = new ethers.Wallet(accounts[sourceIndex], this.provider);
-        const destAddress = this.generateAddress(accounts[destIndex]);
-
-        try {
-            this.log("Sending transaction...");
-            const tx = await sourceWallet.sendTransaction({
-                to: destAddress,
-                value: amountWei
-            });
-            this.log(`Transaction sent! Hash: ${tx.hash}`);
-            await tx.wait();
-            this.log("Transaction confirmed!");
-        } catch (e) {
-            this.log(`Transfer failed: ${e.message}`);
-        }
+        this.log(chalk.yellow("=".repeat(72)));
+        this.log(chalk.green(`Successful Transfers: ${successfulTransfers}`));
+        this.log(chalk.red(`Failed Transfers: ${failedTransfers}`));
+        this.log(chalk.cyan(`Total Wallets Processed: ${accounts.length}`));
     }
 
     async claimFaucetInRange() {
@@ -490,4 +533,4 @@ class PharosTestnet {
 
 // Run the bot
 const bot = new PharosTestnet();
-bot.main().catch(console.error); 
+bot.main().catch(console.error);
