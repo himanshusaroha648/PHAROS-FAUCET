@@ -1,0 +1,19 @@
+{
+  "dependencies": {
+    "axios": "^1.9.0",
+    "chalk": "^5.4.1",
+    "ethers": "^6.14.1",
+    "fake-useragent": "^1.0.1",
+    "socks-proxy-agent": "^8.0.5"
+  },
+  "name": "pharos",
+  "version": "1.0.0",
+  "description": "Pharos Testnet BOT",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}
