@@ -242,14 +242,14 @@ class PharosTestnet {
         // Login
         const token = await this.userLogin(urlLogin);
         if (!token) {
-            this.log("Status: Login Failed");
+            this.log(chalk.red("Status: Login Failed"));
             this.failedClaims++;
             return;
         }
         this.log("Status: Login Success");
 
-        // Wait 2 seconds before claiming faucet
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        // Wait 3 seconds before claiming faucet
+        await new Promise(resolve => setTimeout(resolve, 3000));
 
         // Check Faucet Status
         const faucetStatus = await this.faucetStatus(address, token);
@@ -257,25 +257,50 @@ class PharosTestnet {
             const isAble = faucetStatus.data?.is_able_to_faucet;
 
             if (isAble) {
-                const claim = await this.claimFaucet(address, token);
+                // Retry logic for claimFaucet
+                let claim = null;
+                let retries = 0;
+                let lastError = null;
+                while (retries < 3) {
+                    claim = await this.claimFaucet(address, token);
+                    if (claim?.msg === "ok") {
+                        break;
+                    } else if (claim?.msg === "error") {
+                        // If backend/network error, retry
+                        if (claim.msg && claim.msg.toLowerCase().includes("transfer token failed")) {
+                            lastError = claim;
+                            this.log(chalk.yellow(`Faucet: Claim failed, retry [${retries + 1}/3]`));
+                            await new Promise(resolve => setTimeout(resolve, 5000));
+                            retries++;
+                            continue;
+                        } else {
+                            break;
+                        }
+                    } else {
+                        lastError = claim;
+                        this.log(chalk.yellow(`Faucet: Claim failed, retry [${retries + 1}/3]`));
+                        await new Promise(resolve => setTimeout(resolve, 5000));
+                        retries++;
+                    }
+                }
                 if (claim?.msg === "ok") {
-                    this.log("Faucet: 0.2 PHRS Claimed Successfully");
+                    this.log(chalk.green("Faucet: 0.2 PHRS Claimed Successfully"));
                     this.successfulClaims++;
                 } else if (claim?.msg === "error") {
-                    this.log(`Faucet: ${claim.data?.message || "Claim Failed"}`);
+                    this.log(chalk.red(`Faucet: ${claim.data?.message || "Claim Failed"}`));
                     this.failedClaims++;
                 } else {
-                    this.log("Faucet: Claim Failed - Unknown Error");
+                    this.log(chalk.red(`Faucet: Claim Failed`));
                     this.failedClaims++;
                 }
             } else {
                 const faucetAvailableTs = faucetStatus.data?.avaliable_timestamp;
                 const faucetAvailableWib = new Date(faucetAvailableTs * 1000).toLocaleString('en-US', { timeZone: 'Asia/Jakarta' });
-                this.log(`Faucet: Already Claimed - Available at: ${faucetAvailableWib}`);
+                this.log(chalk.yellow(`Faucet: Already Claimed - Available at: ${faucetAvailableWib}`));
                 this.failedClaims++;
             }
         } else {
-            this.log("Faucet: GET Eligibility Status Failed");
+            this.log(chalk.red("Faucet: GET Eligibility Status Failed"));
             this.failedClaims++;
         }
     }
