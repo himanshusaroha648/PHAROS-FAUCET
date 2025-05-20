@@ -493,13 +493,23 @@ class PharosTestnet {
         // Show total balance before transfer
         this.log(chalk.yellow("Checking balances before transfer..."));
         let totalBalance = 0;
+        let walletsWithBalance = [];
+        
         for (const privateKey of accounts) {
             if (privateKey) {
                 const address = this.generateAddress(privateKey);
                 if (address) {
                     const balance = await this.getBalance(address);
                     if (balance !== "Error") {
-                        totalBalance += parseFloat(balance);
+                        const balanceNum = parseFloat(balance);
+                        if (balanceNum > 0) {
+                            totalBalance += balanceNum;
+                            walletsWithBalance.push({
+                                address,
+                                privateKey,
+                                balance: balanceNum
+                            });
+                        }
                     }
                 }
             }
@@ -509,8 +519,59 @@ class PharosTestnet {
         // Confirm transfer
         const confirm = await this.askQuestion(chalk.yellow(`Do you want to transfer all ${totalBalance} PHRS to ${destAddress}? (y/n) -> `));
         if (confirm.toLowerCase() === 'y') {
-            // Implement transfer logic here
-            this.log(chalk.green("Transfer logic not implemented yet."));
+            this.log(chalk.cyan("Starting transfers..."));
+            let successfulTransfers = 0;
+            let failedTransfers = 0;
+
+            for (const wallet of walletsWithBalance) {
+                try {
+                    const signer = new ethers.Wallet(wallet.privateKey, this.provider);
+                    const balance = await this.provider.getBalance(wallet.address);
+                    
+                    // Calculate gas price and limit
+                    const gasPrice = await this.provider.getFeeData();
+                    const gasLimit = 21000; // Standard ETH transfer gas limit
+                    const gasCost = gasPrice.gasPrice * BigInt(gasLimit);
+                    
+                    // Calculate amount to send (balance - gas cost)
+                    const amountToSend = balance - gasCost;
+                    
+                    if (amountToSend <= 0) {
+                        this.log(chalk.yellow(`Skipping ${this.maskAccount(wallet.address)} - Insufficient balance for gas`));
+                        failedTransfers++;
+                        continue;
+                    }
+
+                    // Send transaction
+                    const tx = await signer.sendTransaction({
+                        to: destAddress,
+                        value: amountToSend,
+                        gasLimit: gasLimit
+                    });
+
+                    this.log(chalk.cyan(`Transfer from ${this.maskAccount(wallet.address)} initiated...`));
+                    const receipt = await tx.wait();
+                    
+                    if (receipt.status === 1) {
+                        this.log(chalk.green(`Successfully transferred ${ethers.formatEther(amountToSend)} PHRS from ${this.maskAccount(wallet.address)}`));
+                        successfulTransfers++;
+                    } else {
+                        this.log(chalk.red(`Transfer failed from ${this.maskAccount(wallet.address)}`));
+                        failedTransfers++;
+                    }
+
+                    // Wait between transfers
+                    await new Promise(resolve => setTimeout(resolve, 3000));
+                } catch (error) {
+                    this.log(chalk.red(`Error transferring from ${this.maskAccount(wallet.address)}: ${error.message}`));
+                    failedTransfers++;
+                }
+            }
+
+            this.log("=".repeat(72));
+            this.log(chalk.green(`Successful Transfers: ${successfulTransfers}`));
+            this.log(chalk.red(`Failed Transfers: ${failedTransfers}`));
+            this.log(chalk.yellow(`Total Processed: ${walletsWithBalance.length}`));
         } else {
             this.log(chalk.yellow("Transfer cancelled."));
         }
