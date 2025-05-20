@@ -6,8 +6,8 @@ const readline = require('readline');
 const chalk = require('chalk').default;
 
 const BASE_API = "https://api.pharosnetwork.xyz";
-const RPC_URL = "https://testnet.dplabs-internal.com"; // Updated Pharos testnet RPC
-const REF_CODE = "LtDCunijXTOizRry"; // Updated to your new invite code
+const RPC_URL = "https://testnet.dplabs-internal.com";
+const REF_CODE = "LtDCunijXTOizRry";
 
 class PharosTestnet {
     constructor() {
@@ -26,7 +26,7 @@ class PharosTestnet {
         
         // Initialize provider with network configuration
         this.provider = new ethers.JsonRpcProvider(RPC_URL, {
-            chainId: 688688, // Correct Pharos testnet chain ID
+            chainId: 688688,
             name: "pharos-testnet"
         });
     }
@@ -264,7 +264,7 @@ class PharosTestnet {
                 return { msg: 'already_claimed', data: { message: 'Already claimed', avaliable_timestamp: statusData.data.avaliable_timestamp } };
             }
 
-            // 4. Claim faucet
+            // 4. Claim faucet using public API
             const claimUrl = `${BASE_API}/faucet/daily?address=${address}`;
             this.log(chalk.cyan('Claiming faucet...'));
             const claimResponse = await axios({
@@ -299,20 +299,48 @@ class PharosTestnet {
 
         this.log(`=========================[ ${this.maskAccount(address)} ]=========================`);
 
-        // Login
-        const token = await this.userLogin(urlLogin);
+        // Retry login up to 3 times
+        let token = null;
+        let loginRetries = 0;
+        while (loginRetries < 3) {
+            token = await this.userLogin(urlLogin);
+            if (token) {
+                this.log("Status: Login Success");
+                break;
+            } else {
+                loginRetries++;
+                if (loginRetries < 3) {
+                    this.log(chalk.yellow(`Login failed, retrying [${loginRetries}/3]...`));
+                    await new Promise(resolve => setTimeout(resolve, 5000));
+                }
+            }
+        }
+
         if (!token) {
-            this.log(chalk.red("Status: Login Failed"));
+            this.log(chalk.red("Status: Login Failed after 3 retries"));
             this.failedClaims++;
             return;
         }
-        this.log("Status: Login Success");
 
         // Wait 3 seconds before claiming faucet
         await new Promise(resolve => setTimeout(resolve, 3000));
 
-        // Check Faucet Status
-        const faucetStatus = await this.faucetStatus(address, token);
+        // Check Faucet Status with retries
+        let faucetStatus = null;
+        let statusRetries = 0;
+        while (statusRetries < 3) {
+            faucetStatus = await this.faucetStatus(address, token);
+            if (faucetStatus?.msg === "ok") {
+                break;
+            } else {
+                statusRetries++;
+                if (statusRetries < 3) {
+                    this.log(chalk.yellow(`Faucet status check failed, retrying [${statusRetries}/3]...`));
+                    await new Promise(resolve => setTimeout(resolve, 5000));
+                }
+            }
+        }
+
         if (faucetStatus?.msg === "ok") {
             const isAble = faucetStatus.data?.is_able_to_faucet;
 
@@ -326,7 +354,16 @@ class PharosTestnet {
                     if (claim?.msg === "ok") {
                         break;
                     } else if (claim?.msg === "error") {
-                        if (claim.msg && claim.msg.toLowerCase().includes("transfer token failed")) {
+                        // Check if error is related to internal IP
+                        if (claim.data?.message?.includes("pharos-1.pharos.testnet.svc.cluster.local") || 
+                            claim.data?.message?.includes("192.168.95.170")) {
+                            lastError = claim;
+                            this.log(chalk.yellow(`Internal IP error, retrying claim [${retries + 1}/3]...`));
+                            // Wait longer for internal IP errors
+                            await new Promise(resolve => setTimeout(resolve, 8000));
+                            retries++;
+                            continue;
+                        } else if (claim.data?.message?.toLowerCase().includes("transfer token failed")) {
                             lastError = claim;
                             this.log(chalk.yellow(`Faucet: Claim failed, retry [${retries + 1}/3]`));
                             await new Promise(resolve => setTimeout(resolve, 5000));
@@ -359,7 +396,7 @@ class PharosTestnet {
                 this.failedClaims++;
             }
         } else {
-            this.log(chalk.red("Faucet: GET Eligibility Status Failed"));
+            this.log(chalk.red("Faucet: GET Eligibility Status Failed after 3 retries"));
             this.failedClaims++;
         }
     }
@@ -471,66 +508,12 @@ class PharosTestnet {
 
         // Confirm transfer
         const confirm = await this.askQuestion(chalk.yellow(`Do you want to transfer all ${totalBalance} PHRS to ${destAddress}? (y/n) -> `));
-        if (confirm.toLowerCase() !== 'y') {
-            this.log(chalk.red("Transfer cancelled."));
-            return;
+        if (confirm.toLowerCase() === 'y') {
+            // Implement transfer logic here
+            this.log(chalk.green("Transfer logic not implemented yet."));
+        } else {
+            this.log(chalk.yellow("Transfer cancelled."));
         }
-
-        // Process each wallet
-        let successfulTransfers = 0;
-        let failedTransfers = 0;
-        let processedCount = 0;
-
-        for (const privateKey of accounts) {
-            if (privateKey) {
-                const address = this.generateAddress(privateKey);
-                if (address) {
-                    const balance = await this.getBalance(address);
-                    if (balance !== "Error" && parseFloat(balance) >= 0.09) {
-                        processedCount++;
-                        this.log(chalk.cyan(`Processing wallet: ${this.maskAccount(address)} [${processedCount}/${accounts.length}]`));
-                        this.log(chalk.cyan(`Balance: ${balance} PHRS`));
-
-                        try {
-                            const wallet = new ethers.Wallet(privateKey, this.provider);
-                            // Get gas price
-                            const gasPrice = await this.provider.getFeeData();
-                            const gasLimit = 21000; // Standard gas limit for simple transfers
-                            const gasCost = gasPrice.gasPrice * BigInt(gasLimit);
-                            // Calculate amount to send (leave some for gas)
-                            const balanceWei = ethers.parseEther(balance);
-                            const amountToSend = balanceWei - gasCost;
-                            if (amountToSend <= 0) {
-                                this.log(chalk.yellow("Balance too low to cover gas fees. Skipping..."));
-                                failedTransfers++;
-                                continue;
-                            }
-                            const tx = await wallet.sendTransaction({
-                                to: destAddress,
-                                value: amountToSend,
-                                gasLimit: gasLimit
-                            });
-                            this.log(chalk.green(`Transaction sent! Hash: ${tx.hash}`));
-                            await tx.wait();
-                            this.log(chalk.green("Transaction confirmed!"));
-                            successfulTransfers++;
-                        } catch (e) {
-                            this.log(chalk.red(`Transfer failed: ${e.message}`));
-                            failedTransfers++;
-                        }
-                        // Add delay between transactions
-                        await new Promise(resolve => setTimeout(resolve, 3000));
-                    } else if (balance !== "Error") {
-                        this.log(chalk.yellow(`Wallet ${this.maskAccount(address)} skipped (balance < 0.09 PHRS)`));
-                    }
-                }
-            }
-        }
-
-        this.log(chalk.yellow("=".repeat(72)));
-        this.log(chalk.green(`Successful Transfers: ${successfulTransfers}`));
-        this.log(chalk.red(`Failed Transfers: ${failedTransfers}`));
-        this.log(chalk.cyan(`Total Wallets Processed: ${accounts.length}`));
     }
 
     async claimFaucetInRange() {
@@ -590,4 +573,4 @@ class PharosTestnet {
 
 // Run the bot
 const bot = new PharosTestnet();
-bot.main().catch(console.error)
+bot.main().catch(console.error);
