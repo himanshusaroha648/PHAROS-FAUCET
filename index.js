@@ -6,8 +6,8 @@ const readline = require('readline');
 const chalk = require('chalk').default;
 
 const BASE_API = "https://api.pharosnetwork.xyz";
-const REF_CODE = "PNFXEcz1CWezuu3g"; // You can change this to your ref code
 const RPC_URL = "https://testnet.dplabs-internal.com"; // Updated Pharos testnet RPC
+const REF_CODE = "LtDCunijXTOizRry"; // Updated to your new invite code
 
 class PharosTestnet {
     constructor() {
@@ -202,31 +202,91 @@ class PharosTestnet {
         }
     }
 
-    async claimFaucet(address, token) {
-        const url = `${BASE_API}/faucet/daily?address=${address}`;
-        const headers = {
-            ...this.headers,
-            "Authorization": `Bearer ${token}`,
-            "Content-Length": "0"
-        };
-        for (let attempt = 0; attempt < 5; attempt++) {
-            try {
-                const response = await axios.post(url, null, {
-                    headers,
-                    timeout: 15000
-                });
-                return response.data;
-            } catch (e) {
-                if (e.response?.data) {
-                    return e.response.data;
-                }
-                if (attempt < 4) {
-                    await new Promise(resolve => setTimeout(resolve, 2000));
-                    continue;
-                }
-                this.log(chalk.red(`Faucet claim error: ${e.message}`));
-                return null;
+    async claimFaucet(address, token, privateKey) {
+        try {
+            // 1. Sign message
+            const wallet = new ethers.Wallet(privateKey);
+            const message = "pharos";
+            const signature = await wallet.signMessage(message);
+
+            // 2. Login to get JWT
+            const loginUrl = `${BASE_API}/user/login?address=${address}&signature=${signature}&invite_code=${REF_CODE}`;
+            const headers = {
+                accept: "application/json, text/plain, */*",
+                "accept-language": "en-US,en;q=0.8",
+                authorization: "Bearer null",
+                "sec-ch-ua": '"Chromium";v="136", "Brave";v="136", "Not.A/Brand";v="99"',
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": '"Windows"',
+                "sec-fetch-dest": "empty",
+                "sec-fetch-mode": "cors",
+                "sec-fetch-site": "same-site",
+                "sec-gpc": "1",
+                Referer: "https://testnet.pharosnetwork.xyz/",
+                "Referrer-Policy": "strict-origin-when-cross-origin",
+                "User-Agent": new FakeUserAgent().random,
+            };
+            this.log(chalk.cyan('Sending login request for faucet...'));
+            const loginResponse = await axios({
+                method: 'post',
+                url: loginUrl,
+                headers,
+                timeout: 15000
+            });
+            const loginData = loginResponse.data;
+            if (loginData.code !== 0 || !loginData.data || !loginData.data.jwt) {
+                this.log(chalk.red(`Login failed for faucet: ${loginData.msg || 'Unknown error or no JWT'}`));
+                return { msg: 'error', data: { message: loginData.msg || 'Login failed' } };
             }
+            const jwt = loginData.data.jwt;
+
+            // 3. Check faucet status
+            const statusUrl = `${BASE_API}/faucet/status?address=${address}`;
+            const statusHeaders = {
+                ...headers,
+                authorization: `Bearer ${jwt}`,
+            };
+            this.log(chalk.cyan('Checking faucet status...'));
+            const statusResponse = await axios({
+                method: 'get',
+                url: statusUrl,
+                headers: statusHeaders,
+                timeout: 15000
+            });
+            const statusData = statusResponse.data;
+            if (statusData.code !== 0 || !statusData.data) {
+                this.log(chalk.red(`Faucet status check failed: ${statusData.msg || 'Unknown error or no data'}`));
+                return { msg: 'error', data: { message: statusData.msg || 'Status check failed' } };
+            }
+            if (!statusData.data.is_able_to_faucet) {
+                const nextAvailable = new Date(statusData.data.avaliable_timestamp * 1000).toLocaleString('en-US', { timeZone: 'Asia/Jakarta' });
+                this.log(chalk.yellow(`Faucet: Already Claimed - Available at: ${nextAvailable}`));
+                return { msg: 'already_claimed', data: { message: 'Already claimed', avaliable_timestamp: statusData.data.avaliable_timestamp } };
+            }
+
+            // 4. Claim faucet
+            const claimUrl = `${BASE_API}/faucet/daily?address=${address}`;
+            this.log(chalk.cyan('Claiming faucet...'));
+            const claimResponse = await axios({
+                method: 'post',
+                url: claimUrl,
+                headers: statusHeaders,
+                timeout: 15000
+            });
+            const claimData = claimResponse.data;
+            if (claimData.code === 0) {
+                this.log(chalk.green(`Faucet: 0.2 PHRS Claimed Successfully`));
+                return { msg: 'ok' };
+            } else {
+                this.log(chalk.red(`Faucet claim failed: ${claimData.msg || 'Unknown error'}`));
+                return { msg: 'error', data: { message: claimData.msg || 'Claim failed' } };
+            }
+        } catch (error) {
+            this.log(chalk.red(`Faucet claim process failed: ${error.message}`));
+            if (error.response && error.response.data) {
+                this.log(chalk.red(`Faucet API Error: ${JSON.stringify(error.response.data)}`));
+            }
+            return { msg: 'error', data: { message: error.message } };
         }
     }
 
@@ -238,9 +298,6 @@ class PharosTestnet {
         if (!urlLogin) return;
 
         this.log(`=========================[ ${this.maskAccount(address)} ]=========================`);
-
-        // Wait 2 seconds before login
-        await new Promise(resolve => setTimeout(resolve, 2000));
 
         // Login
         const token = await this.userLogin(urlLogin);
@@ -265,7 +322,7 @@ class PharosTestnet {
                 let retries = 0;
                 let lastError = null;
                 while (retries < 3) {
-                    claim = await this.claimFaucet(address, token);
+                    claim = await this.claimFaucet(address, token, privateKey);
                     if (claim?.msg === "ok") {
                         break;
                     } else if (claim?.msg === "error") {
@@ -533,4 +590,4 @@ class PharosTestnet {
 
 // Run the bot
 const bot = new PharosTestnet();
-bot.main().catch(console.error);
+bot.main().catch(console.error)
